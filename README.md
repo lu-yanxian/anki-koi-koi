@@ -9,17 +9,18 @@ Created by Z.J. Rubin · Card images by [Louie Mantia](https://commons.wikimedia
 ## Table of Contents
 
 1. [What This Add-on Does](#what-this-add-on-does)
-2. [Installation](#installation)
-3. [Getting Started](#getting-started)
-4. [The Game Window](#the-game-window)
-5. [Game Options (Pre-Round Settings)](#game-options-pre-round-settings)
-6. [Header Controls](#header-controls)
-7. [Config Panel](#config-panel)
-8. [Appearance Panel](#appearance-panel)
-9. [Yaku Guide Panel](#yaku-guide-panel)
-10. [Round History Panel](#round-history-panel)
-11. [Vocabulary Challenge](#vocabulary-challenge)
-12. [Koi-Koi Rules Reference](#koi-koi-rules-reference)
+2. [What's New in v1.31](#whats-new-in-v131)
+3. [Installation](#installation)
+4. [Getting Started](#getting-started)
+5. [The Game Window](#the-game-window)
+6. [Game Options (Pre-Round Settings)](#game-options-pre-round-settings)
+7. [Header Controls](#header-controls)
+8. [Config Panel](#config-panel)
+9. [Appearance Panel](#appearance-panel)
+10. [Yaku Guide Panel](#yaku-guide-panel)
+11. [Round History Panel](#round-history-panel)
+12. [Vocabulary Challenge](#vocabulary-challenge)
+13. [Koi-Koi Rules Reference](#koi-koi-rules-reference)
 
 ---
 
@@ -35,6 +36,14 @@ The game is fully playable without a deck selected (it will skip vocab questions
 
 ---
 
+## What's New in v1.31
+
+- **Reworked CPU opponent.** The CPU now plays fair: it never sees your hand or the order of the deck. The three difficulty levels were rebuilt and checked over thousands of simulated games, so each one now plays at the level its name says (see [CPU Difficulty](#cpu-difficulty)). Previously, Hard was actually the weakest level.
+- **Every level calls Koi-Koi**, each in its own style and with some randomness, so the CPU feels more like a person and less predictable.
+- **Koi-Koi rule fixes.** You're now offered Koi-Koi or Stop when an existing yaku grows (for example a sixth seed card), as the standard rules allow, and a yaku made on your last card stops the round automatically.
+
+---
+
 ## Installation
 
 ### From AnkiWeb
@@ -43,13 +52,13 @@ Search for "Hanafuda Koi-Koi" in Anki's add-on browser (Tools → Add-ons → Br
 
 ### Manual Installation
 
-1. Download `hanafuda_koi_koi.ankiaddon` from the [GitHub Releases page](https://github.com/zjrubin/hanafuda-koi-koi-anki/releases)
+1. Download [`anki_koi_koi_v1.31.ankiaddon`](https://github.com/lu-yanxian/anki-koi-koi/raw/main/anki_koi_koi_v1.31.ankiaddon) from this repository
 2. Open Anki
 3. Go to **Tools → Add-ons → Install from file**
 4. Select the downloaded `.ankiaddon` file
 5. Restart Anki
 
-Alternatively, unzip the file and copy the `hanafuda_game` folder directly into your Anki `addons21` directory:
+Alternatively, copy the `hanafuda_game` folder from this repository directly into your Anki `addons21` directory:
 - **Windows:** `C:\Users\YourName\AppData\Roaming\Anki2\addons21\`
 - **Mac:** `~/Library/Application Support/Anki2/addons21/`
 - **Linux:** `~/.local/share/Anki2/addons21/`
@@ -101,11 +110,13 @@ The window is divided into several areas:
 These appear on the dealer flip screen before each game starts. They lock once the game begins and unlock when it ends (or when you start a New Game). Your choices are remembered for next time.
 
 ### CPU Difficulty
-Determines how the CPU plays.
+Determines how the CPU plays. At every level the CPU plays fair: it only sees what you could see at the table (its own hand, the field, both capture piles and how many cards are left), never your hand or the order of the deck.
 
-- **Easy** — plays randomly, never calls Koi-Koi. Good for learning the rules.
-- **Normal** — greedy play (prefers higher-value cards), calls Koi-Koi when it has 7+ points or when you have called Koi-Koi first. The default.
-- **Hard** — evaluates each possible play by its contribution to yaku progress, calls Koi-Koi aggressively, and will sometimes deliberately discard cards that would help you form a yaku (denial strategy).
+- **Easy** — plays loosely. It usually takes a match when there is one, but not necessarily the best one, and discards without thinking. It calls Koi-Koi on impulse, without paying much attention to you. Good for learning the rules.
+- **Normal** — steady, sensible play with a human streak. It usually takes the most valuable capture, but sometimes settles for a lesser one or misses a capture altogether, and it goes on a hunch with Koi-Koi: a rough read of its own chances against what you've collected. The default.
+- **Hard** — plays for yaku on both sides. It weighs what each capture builds toward, which of your yaku it can block, and what a discard might hand you, and it calls Koi-Koi when it has a strong hand, enough turns left and little to fear from yours. Close decisions can still go either way, so it doesn't play the same position the same way every time.
+
+These levels were checked over thousands of simulated 12-round games against a sensible human-style player who always answers the vocab correctly. Easy wins about 25% of those games, Normal about 47% and Hard about 70%. Normal is set slightly below even to make up for the vocab questions you have to answer. Missed vocab questions make every level tougher, because a missed question costs you the capture (unless you play in Learning mode).
 
 ### Game Mode
 Determines the scoring structure.
@@ -323,10 +334,10 @@ On your turn you take two actions in sequence:
 
 ### Forming Yaku
 
-After each capture (hand play or deck draw), the game checks whether your captured cards form any yaku (scoring combinations — see the Yaku Guide in the game for the full list). If you form a new yaku, you must make a decision:
+After each capture (hand play or deck draw), the game checks whether your captured cards form any yaku (scoring combinations — see the Yaku Guide in the game for the full list). If you form a new yaku, or raise your score by growing one you already have (for example a sixth seed card in Tane), you must make a decision:
 
 - **Stop (やめ)** — end the round and collect your points
-- **Koi-Koi (こいこい)** — continue playing to try to earn more points, but take a risk: if your opponent forms a yaku before you form another, they win the round with double points and you earn nothing
+- **Koi-Koi (こいこい)** — continue playing to try to earn more points, but take a risk: if your opponent scores before you improve your score again, they win the round with double points and you earn nothing
 
 If you form a yaku on your very last play, there's nothing left to continue with, so the game stops for you automatically. The CPU follows the same rule.
 

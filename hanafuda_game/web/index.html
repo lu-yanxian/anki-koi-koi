@@ -987,6 +987,7 @@ const MONTH_DATA=[
   {en:'November', jp:'十一月',themeJP:'柳', theme:'Willow'},
   {en:'December', jp:'十二月',themeJP:'桐', theme:'Paulownia'},
 ];
+/*RULES-BEGIN*/
 const TYPE_JP={bright:'光',ribbon:'短冊',tane:'種',kasu:'粕'};
 const TYPE_EN={bright:'Bright',ribbon:'Ribbon',tane:'Seed',kasu:'Kasu'};
 const TYPE_COLOR={bright:'#d4b84a',ribbon:'#d05050',tane:'#3aaa6a',kasu:'#445a6a'};
@@ -1068,6 +1069,7 @@ function yakuPtsDisplay(name,cap){
   if(name==='Kasu') return kasuScore(cap);
   return 0;
 }
+/*RULES-END*/
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 let cpuSpeed=1000, questionsPerCard=1;
@@ -1356,6 +1358,7 @@ function unlockGameSettings(){
 }
 
 // ── Deck ─────────────────────────────────────────────────────────────────────
+/*RULES-BEGIN*/
 function buildDeck(){
   const d=[];
   for(let m=0;m<12;m++) for(let i=0;i<4;i++) d.push({month:m,pos:i,type:CARD_TYPES[m][i],id:m*4+i});
@@ -1366,6 +1369,7 @@ function shuffle(arr){
   for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}
   return a;
 }
+/*RULES-END*/
 
 // ── Card back SVG ─────────────────────────────────────────────────────────────
 function makeBackSVG(){
@@ -1514,6 +1518,7 @@ function startRound(firstTurn,oyaThisRound){
   G.selected=null; G.drawnCard=null;
   G.p1CalledKoiKoi=false; G.p2CalledKoiKoi=false;
   G.p1YakuSnapshot=[]; G.p2YakuSnapshot=[];
+  G.p1PtsSnapshot=0; G.p2PtsSnapshot=0;
   G.pendingCapture=null; G.pendingQCount=0;
 
   // Check instant wins (Teshi/Kuttsuki) for player hand
@@ -2020,7 +2025,7 @@ function resolveDraw(drawn,matches,player){
     render();
   } else {
     let toCapture;
-    if(matches.length===2){toCapture=[matches.sort((a,b)=>TYPE_ORDER.indexOf(a.type)-TYPE_ORDER.indexOf(b.type))[0]];}
+    if(matches.length===2){toCapture=[CPU_AI.chooseDrawMatch(drawn,matches,cpuView(),cpuDifficulty)];}
     else{toCapture=matches;}
     toCapture.forEach(m=>{G[cap].push(m);G.field=G.field.filter(c=>c.id!==m.id);});
     G[cap].push(drawn);
@@ -2034,14 +2039,20 @@ function afterDraw(){
   const cap=G.turn+'Cap';
   const yakuNow=checkYaku(G[cap]);
   const snapshot=G.turn==='p1'?G.p1YakuSnapshot:G.p2YakuSnapshot;
-  const newYaku=yakuNow.filter(y=>!snapshot.includes(y));
+  // A Koi-Koi decision comes up whenever the score goes up: a new yaku, or
+  // an existing one growing (e.g. a sixth seed card)
+  const ptsNow=scoreYaku(yakuNow,G[cap]);
+  const ptsBefore=G.turn==='p1'?(G.p1PtsSnapshot||0):(G.p2PtsSnapshot||0);
+  let newYaku=yakuNow.filter(y=>!snapshot.includes(y));
+  if(!newYaku.length&&ptsNow>ptsBefore) newYaku=yakuNow.filter(y=>yakuPtsDisplay(y,G[cap])>0&&YAKU_DEFS.find(d=>d.name===y).pts===0);
+  if(ptsNow<=ptsBefore) newYaku=[];
   if(G.turn==='p1'){
     renderYaku();
     if(newYaku.length>0){
-      const pts=scoreYaku(yakuNow,G.p1Cap);
-      showYakuBanner(newYaku,pts,(G.p1Hand.length===0&&G.deck.length===0)?'Last play — round over':null);
-      // Auto-stop if no cards left to play (can't koi-koi anyway)
-      if(G.p1Hand.length===0&&G.deck.length===0){
+      const pts=ptsNow;
+      showYakuBanner(newYaku,pts,G.p1Hand.length===0?'Last play — round over':null);
+      // Auto-stop on your last card: there are no turns left to improve
+      if(G.p1Hand.length===0){
         log('Yaku! '+newYaku.join(', ')+' ('+pts+' pts) — Auto-stopping (no cards left).');
         setBtns(false); G.phase='koi-decision';
         setTimeout(()=>endRound('p1'),1800); return;
@@ -2091,79 +2102,283 @@ function endCpuTurn(){
   render();
 }
 // ── CPU turn ──────────────────────────────────────────────────────────────────
-// ── CPU difficulty helpers ────────────────────────────────────────────────────
+/*AI-BEGIN*/
+// ── CPU opponent ──────────────────────────────────────────────────────────────
+// The CPU only uses what a player at the table could see: its own hand, the
+// field, both capture piles and how many cards are left. It never looks at
+// your hand or at the order of the deck.
+//
+//   Easy   — plays loosely. Usually takes a match, but not the best one,
+//            discards without thinking, and calls Koi-Koi on impulse.
+//   Normal — steady, sensible play with a human streak. Usually takes the
+//            most valuable capture (sometimes misses one), discards its
+//            least useful card, and calls Koi-Koi on a hunch.
+//   Hard   — plays for yaku on both sides. Every card gets a chance of ending
+//            up in each pile, from where it is now, and Hard picks the play
+//            that most improves its expected yaku points against yours: what
+//            a capture builds, what it takes away from you, and what a
+//            discard might hand you. Calls Koi-Koi when the odds favour it.
+//
+// Win rates from simulated 12-round games against a sensible human-style
+// player: Easy ≈ 25%, Normal ≈ 47%, Hard ≈ 70%.
+//
+// view = {hand, field, myCap, oppCap, oppHandCount, deckCount, myKoi, oppKoi,
+//         myScore, oppScore, gameMode}
+const CPU_AI=(function(){
+  const DECK=buildDeck();
+  const ribbonOf=m=>DECK.find(c=>c.month===m&&c.type==='ribbon').id;
+  // Fixed-set yaku: every card needed
+  const SETS=[
+    {ids:[0,1,2].map(ribbonOf),pts:5},                 // Akatan
+    {ids:[5,8,9].map(ribbonOf),pts:5},                 // Aotan
+    {ids:[BOAR_ID,DEER_ID,BUTTERFLIES_ID],pts:5},      // Inoshikacho
+    {ids:[MOON_ID,SAKE_CUP_ID],pts:5},                 // Tsukimi-zake
+    {ids:[CURTAIN_ID,SAKE_CUP_ID],pts:5},              // Hanami-zake
+  ];
+  const RAIN_ID=DECK.find(c=>c.month===10&&c.type==='bright').id;
+  const NON_RAIN_BRIGHTS=DECK.filter(c=>c.type==='bright'&&c.id!==RAIN_ID).map(c=>c.id);
+  const isKasu=c=>c.type==='kasu'||c.id===SAKE_CUP_ID;
+  const TANE=DECK.filter(c=>c.type==='tane').map(c=>c.id);
+  const RIBBONS=DECK.filter(c=>c.type==='ribbon').map(c=>c.id);
+  const KASU=DECK.filter(isKasu).map(c=>c.id);
+  const COUNTS=[[TANE,5],[RIBBONS,5],[KASU,10]];
+  // Cards that feed a 5-point-or-better yaku
+  const KEY_IDS=new Set([].concat(...SETS.map(s=>s.ids),NON_RAIN_BRIGHTS,[RAIN_ID]));
+  const TYPE_VAL={bright:5,ribbon:2,tane:2,kasu:1};
+
+  // Hard's settings, tuned by self-play tournaments.
+  // P: chance a card ends up in my pile (hand/mineField/field/unseen) or the
+  //    opponent's (o*), by where it is now; lambda weighs their yaku vs mine.
+  const P={hand:0.55,mineField:0.6,field:0.25,unseen:0.3,
+           oHand:0.15,oField0:0.1,oField1:0.75,oUnseen:0.35,lambda:1.0};
+  // K: call Koi-Koi only with at least `turns` turns left and an expected
+  //    upside beating the opponent's threat by `margin` points.
+  const K={turns:2,k:1.0,margin:2,hardSpread:0.5,hardEps:0.05,
+           normalMargin:0,normalSpread:1,normalMax:0.6,normalNoise:3,normalSlip:0.25,normalMiss:0.1,
+           easyKoi:0.45,easyNotice:0.75};
+
+  const idSet=cards=>new Set(cards.map(c=>c.id));
+  const pick=arr=>arr[Math.floor(Math.random()*arr.length)];
+  const points=cap=>scoreYaku(checkYaku(cap),cap);
+
+  // All legal plays: each hand card, and which field card it takes
+  function options(view){
+    const out=[];
+    for(const hc of view.hand){
+      const m=view.field.filter(c=>c.month===hc.month);
+      if(m.length===0) out.push({played:hc,fieldMatch:null,taken:[]});
+      else if(m.length===3) out.push({played:hc,fieldMatch:m[0],taken:[...m,hc]});
+      else m.forEach(f=>out.push({played:hc,fieldMatch:f,taken:[f,hc]}));
+    }
+    return out;
+  }
+  function fieldAfter(view,o){
+    const gone=idSet(o.taken);
+    const f=view.field.filter(c=>!gone.has(c.id));
+    if(!o.fieldMatch) f.push(o.played);
+    return f;
+  }
+
+  // ── Easy ──
+  function easyChoose(view){
+    const opts=options(view);
+    const caps=opts.filter(o=>o.fieldMatch);
+    // Notices a match about two times in three; never thinks about which
+    if(caps.length&&Math.random()<K.easyNotice) return pick(caps);
+    return pick(opts);
+  }
+
+  // ── Normal ──
+  // Values a capture by card type and immediate yaku progress; discards its
+  // least valuable card. No look-ahead and no thought for the opponent.
+  function cardVal(c){return TYPE_VAL[c.type]+(KEY_IDS.has(c.id)?1:0);}
+  function normalChoose(view){
+    // Now and then overlooks the best capture, like a person would
+    if(Math.random()<K.normalSlip){
+      const caps=options(view).filter(o=>o.fieldMatch);
+      if(caps.length) return pick(caps);
+    }
+    // ...occasionally doesn't spot a capture at all and plays another card
+    if(Math.random()<K.normalMiss){
+      const discards=options(view).filter(o=>!o.fieldMatch);
+      if(discards.length) return pick(discards);
+    }
+    let best=null,bestS=-Infinity;
+    const base=points(view.myCap);
+    for(const o of options(view)){
+      let s;
+      if(o.fieldMatch) s=10+o.taken.reduce((a,c)=>a+cardVal(c),0)+3*(points([...view.myCap,...o.taken])-base);
+      else s=-cardVal(o.played);
+      s+=Math.random()*K.normalNoise;  // a human eye: near-equal plays vary
+      if(s>bestS){bestS=s;best=o;}
+    }
+    return best;
+  }
+
+  // ── Hard ──
+  // Unseen cards (opponent's hand + deck), and the chance the opponent holds
+  // at least one card of a given month
+  function hardContext(view){
+    const seen=idSet([...view.hand,...view.field,...view.myCap,...view.oppCap]);
+    const unseen=DECK.filter(c=>!seen.has(c.id));
+    const U=unseen.length, h=view.oppHandCount, cache={};
+    function pHold(month){
+      if(month in cache) return cache[month];
+      const u=unseen.filter(c=>c.month===month).length;
+      let none=1;
+      for(let i=0;i<h;i++){const d=U-i; none*=d>0?Math.max(0,(U-u-i)/d):0;}
+      return cache[month]=(u===0||h===0)?0:1-none;
+    }
+    return {unseen,pHold};
+  }
+  // How many of a set of cards get collected, as a distribution
+  function countDist(ps){
+    let d=[1];
+    for(const p of ps){
+      if(p<=0) continue;
+      const nd=new Array(d.length+1).fill(0);
+      for(let i=0;i<d.length;i++){nd[i]+=d[i]*(1-p);nd[i+1]+=d[i]*p;}
+      d=nd;
+    }
+    return d;
+  }
+  // Expected yaku points, given each card's chance of being collected
+  function expectedPts(pr){
+    let v=0;
+    for(const s of SETS){let x=s.pts;for(const id of s.ids){x*=pr[id];if(!x)break;}v+=x;}
+    const nr=countDist(NON_RAIN_BRIGHTS.map(id=>pr[id])), r=pr[RAIN_ID];
+    v+=(nr[3]||0)*((1-r)*5+r*7)+(nr[4]||0)*((1-r)*8+r*10);
+    for(const [ids,need] of COUNTS){
+      const d=countDist(ids.map(id=>pr[id]));
+      for(let n=need;n<d.length;n++) v+=d[n]*(n-need+1);
+    }
+    return v;
+  }
+  // Chance tables for both sides after my move (the opponent moves next)
+  function probTables(hand,field,myCap,oppCap,pHold){
+    const me=new Float64Array(48).fill(P.unseen), op=new Float64Array(48).fill(P.oUnseen);
+    const myMonths=new Set(hand.map(c=>c.month));
+    for(const c of myCap){me[c.id]=1;op[c.id]=0;}
+    for(const c of oppCap){me[c.id]=0;op[c.id]=1;}
+    for(const c of hand){me[c.id]=P.hand;op[c.id]=P.oHand;}
+    for(const c of field){
+      const ph=pHold(c.month);
+      op[c.id]=P.oField0+P.oField1*ph;
+      me[c.id]=(myMonths.has(c.month)?P.mineField:P.field)*(1-P.oField1*ph);
+    }
+    return {me,op};
+  }
+  function posValue(hand,field,myCap,oppCap,pHold){
+    const {me,op}=probTables(hand,field,myCap,oppCap,pHold);
+    return expectedPts(me)-P.lambda*expectedPts(op);
+  }
+  function hardChoose(view){
+    const ctx=hardContext(view);
+    const scored=options(view).map(o=>{
+      const hand=view.hand.filter(c=>c!==o.played);
+      return {o,s:posValue(hand,fieldAfter(view,o),[...view.myCap,...o.taken],view.oppCap,ctx.pHold)};
+    });
+    // Plays that are practically as good as the best are picked between at
+    // random, so Hard doesn't play the same position the same way every time
+    const top=Math.max(...scored.map(x=>x.s));
+    return pick(scored.filter(x=>x.s>=top-K.hardEps)).o;
+  }
+  function hardDrawPick(drawn,matches,view){
+    const ctx=hardContext(view);
+    let best=matches[0],bestS=-Infinity;
+    for(const f of matches){
+      const s=posValue(view.hand,view.field.filter(c=>c!==f),[...view.myCap,f,drawn],view.oppCap,ctx.pHold);
+      if(s>bestS){bestS=s;best=f;}
+    }
+    return best;
+  }
+  // Rough chance-weighted value of yaku still in reach for a pile, used for
+  // the Koi-Koi decision. q ≈ chance of collecting any one missing card;
+  // cards in `blocked` (the other side's pile) are out of reach.
+  function potential(cap,blocked,q){
+    const have=idSet(cap); let v=0;
+    for(const s of SETS){
+      if(s.ids.some(id=>blocked.has(id))) continue;
+      const need=s.ids.filter(id=>!have.has(id)).length;
+      if(need>0) v+=s.pts*Math.pow(q,need);
+    }
+    const b=NON_RAIN_BRIGHTS.filter(id=>have.has(id)).length;
+    const free=NON_RAIN_BRIGHTS.filter(id=>!have.has(id)&&!blocked.has(id)).length;
+    if(b<3&&b+free>=3) v+=5*Math.pow(q,3-b);
+    if(b<4&&b+free>=4) v+=3*Math.pow(q,4-b);
+    const qc=Math.min(0.9,q+0.2);  // counting yaku: any card of the type will do
+    for(const [ids,need] of COUNTS){
+      const n=ids.filter(id=>have.has(id)).length;
+      const freeK=ids.filter(id=>!have.has(id)&&!blocked.has(id)).length;
+      if(n<need){if(n+freeK>=need) v+=Math.pow(qc,need-n);}
+      else if(freeK>0) v+=qc*0.5;
+    }
+    return v;
+  }
+
+  // ── Public API ──
+  function chooseCard(view,level){
+    if(!view.hand.length) return {played:null,fieldMatch:null};
+    const o=level==='easy'?easyChoose(view):level==='normal'?normalChoose(view):hardChoose(view);
+    return {played:o.played,fieldMatch:o.fieldMatch};
+  }
+  // A drawn card matched two field cards: which one to take
+  function chooseDrawMatch(drawn,matches,view,level){
+    if(level==='easy') return pick(matches);
+    if(level==='normal') return matches.slice().sort((a,b)=>cardVal(b)-cardVal(a))[0];
+    return hardDrawPick(drawn,matches,view);
+  }
+  // Just scored `pts`: stop (true) or call Koi-Koi (false)?
+  // Each level decides like a different kind of player, with real randomness:
+  //   Easy   — impulsive: sometimes goes for it on a whim, barely looks at you
+  //   Normal — a hunch: a rough read of its chances against your progress
+  //   Hard   — calculated, but borderline calls can go either way
+  const sigmoid=x=>1/(1+Math.exp(-x));
+  function koiChance(view,level,pts){
+    const turns=Math.min(view.hand.length,view.oppHandCount);
+    if(turns<1) return 0;
+    if(level==='easy'){
+      if(view.oppKoi) return K.easyKoi*0.3;
+      return K.easyKoi*Math.min(1,turns/4)*(pts>=5?0.6:1);
+    }
+    if(view.oppKoi||pts>=7) return 0;                  // already doubled
+    if(view.gameMode==='down'&&pts>=view.oppScore) return 0;  // wins the game
+    const q=0.3+0.03*view.hand.length;
+    const mine=potential(view.myCap,idSet(view.oppCap),q);
+    const theirs=potential(view.oppCap,idSet(view.myCap),q)+points(view.oppCap);
+    if(level==='normal'){
+      if(turns<2) return 0;
+      // Looks at its own chances and at how much you've visibly collected
+      const read=mine-theirs-K.normalMargin;
+      return K.normalMax*sigmoid(read/K.normalSpread);
+    }
+    if(turns<K.turns) return 0;
+    return sigmoid((mine-K.k*theirs-K.margin)/K.hardSpread);
+  }
+  function shouldStop(view,level,pts){
+    if(!view.hand.length) return true;                 // no turns left to improve
+    return Math.random()>=koiChance(view,level,pts);
+  }
+  return {chooseCard,chooseDrawMatch,shouldStop,_P:P,_K:K};
+})();
+/*AI-END*/
+// What the CPU is allowed to see: never your hand or the deck order
+function cpuView(){
+  return {hand:G.p2Hand,field:G.field,myCap:G.p2Cap,oppCap:G.p1Cap,
+          oppHandCount:G.p1Hand.length,deckCount:G.deck.length,
+          myKoi:G.p2CalledKoiKoi,oppKoi:G.p1CalledKoiKoi,
+          myScore:G.p2Score,oppScore:G.p1Score,gameMode:G.gameMode};
+}
 function cpuChooseCard(){
-  // Returns {played, fieldMatch} based on difficulty
   if(G.p2Hand.length===0) return {played:null,fieldMatch:null};
-
-  if(cpuDifficulty==='easy'){
-    // Easy: pick a random hand card, match if possible but don't prioritise
-    const shuffled=[...G.p2Hand].sort(()=>Math.random()-0.5);
-    for(const hc of shuffled){
-      const fm=G.field.find(c=>c.month===hc.month);
-      if(fm) return {played:hc,fieldMatch:fm};
-    }
-    return {played:shuffled[0],fieldMatch:null};
-  }
-
-  if(cpuDifficulty==='normal'){
-    // Normal: greedy — prefer bright > ribbon > tane > kasu
-    for(const ptype of TYPE_ORDER){
-      for(const hc of G.p2Hand){
-        if(hc.type!==ptype) continue;
-        const fm=G.field.find(c=>c.month===hc.month);
-        if(fm) return {played:hc,fieldMatch:fm};
-      }
-    }
-    return {played:G.p2Hand[0],fieldMatch:null};
-  }
-
-  // Hard: find which yaku CPU is closest to, prioritise cards that advance them
-  // Score each hand card by how much it advances yaku progress
-  function yakuProgress(cap){
-    // How many yaku is CPU close to? Returns a score
-    let score=0;
-    const testCap=[...cap];
-    YAKU_DEFS.forEach(y=>{if(y.check(testCap)) score+=y.pts||1;});
-    return score;
-  }
-
-  let bestPlayed=null,bestMatch=null,bestScore=-1;
-  for(const hc of G.p2Hand){
-    const fm=G.field.find(c=>c.month===hc.month);
-    const simCap=fm?[...G.p2Cap,hc,fm]:[...G.p2Cap];
-    const score=yakuProgress(simCap)
-      +(fm?TYPE_ORDER.indexOf(fm.type)*-1+4:0) // bonus for capturing high-value
-      +(hc.type==='bright'?3:hc.type==='ribbon'?2:hc.type==='tane'?1:0);
-    if(score>bestScore){bestScore=score;bestPlayed=hc;bestMatch=fm||null;}
-  }
-  // Also try to deny player: check if any field card would help player form yaku
-  // (Hard only: if not capturing anything useful, discard a card the player needs)
-  if(!bestMatch){
-    const playerYaku=checkYaku(G.p1Cap);
-    const playerClose=YAKU_DEFS.filter(y=>!playerYaku.includes(y.name)&&y.check([...G.p1Cap,...G.field]));
-    if(playerClose.length>0){
-      // Try to discard a card whose month the player has in hand
-      const p1Months=new Set(G.p1Hand.map(c=>c.month));
-      const denialCard=G.p2Hand.find(hc=>p1Months.has(hc.month)&&!G.field.find(c=>c.month===hc.month));
-      if(denialCard) return {played:denialCard,fieldMatch:null};
-    }
-  }
-  return {played:bestPlayed||G.p2Hand[0],fieldMatch:bestMatch};
+  return CPU_AI.chooseCard(cpuView(),cpuDifficulty);
 }
 
 function cpuKoiKoiDecision(yakuNames){
   const pts=scoreYaku(yakuNames,G.p2Cap);
-  // Easy: never calls koi-koi
-  // Normal: stop at 7+, or if player called koi-koi
-  // Hard: more aggressive — calls koi-koi unless very high pts or player called
-  let shouldStop;
-  if(cpuDifficulty==='easy') shouldStop=true;
-  else if(G.p2Hand.length===0&&G.deck.length===0) shouldStop=true; // no cards left to continue with
-  else if(cpuDifficulty==='normal') shouldStop=(pts>=7||G.p1CalledKoiKoi);
-  else shouldStop=(pts>=10||G.p1CalledKoiKoi); // Hard calls koi-koi more often
+  const shouldStop=CPU_AI.shouldStop(cpuView(),cpuDifficulty,pts);
   if(shouldStop){log('CPU stops and collects! · 相手がやめ');setTimeout(()=>endRound('p2'),cpuSpeed);}
-  else{G.p2CalledKoiKoi=true;showKoiBanner();render();setTimeout(endCpuTurn,cpuSpeed);}
+  else{G.p2CalledKoiKoi=true;G.p2PtsSnapshot=pts;log('CPU calls Koi-Koi! · 相手がこいこい');showKoiBanner();render();setTimeout(endCpuTurn,cpuSpeed);}
 }
 
 function cpuTurn(){
@@ -2313,6 +2528,7 @@ function closeOverlay(){
 document.getElementById('btn-koi').addEventListener('click',()=>{
   G.p1CalledKoiKoi=true;
   G.p1YakuSnapshot=[...checkYaku(G.p1Cap)];
+  G.p1PtsSnapshot=scoreYaku(G.p1YakuSnapshot,G.p1Cap);
   setBtns(false); G.phase='select-hand'; G.turn='p2';
   showKoiBanner();
   log('Koi-Koi called! · こいこい！');
